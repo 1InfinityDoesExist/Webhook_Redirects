@@ -2,13 +2,11 @@ package com.webooksredirects.webhooks.zoom;
 
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
-import java.util.Base64;
 import java.util.Enumeration;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import javax.servlet.http.HttpServletRequest;
 
+import org.apache.commons.codec.digest.HmacUtils;
 import org.apache.commons.io.IOUtils;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
@@ -23,6 +21,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import lombok.extern.slf4j.Slf4j;
 
+/**
+ * 
+ * https://marketplace.zoom.us/docs/api-reference/webhook-reference/
+ * https://marketplace.zoom.us/docs/api-reference/webhook-reference/#validate-your-webhook-endpoint
+ * 
+ * @author AP
+ *
+ */
 @Slf4j
 @RestController
 public class ZoomWebhook {
@@ -39,11 +45,50 @@ public class ZoomWebhook {
 
 		log.info("--------JsonObject : {}", payload);
 
+		String plainToken = (String) (((JSONObject) payload.get("payload")).get("plainToken"));
+
+		log.info("------Message : {}", plainToken);
+
+		String hashForVerifyValue = hashForVerify(plainToken, secretKey);
+
+		return ResponseEntity.status(HttpStatus.OK).body(new ModelMap().addAttribute("plainToken", plainToken)
+				.addAttribute("encryptedToken", hashForVerifyValue));
+
+	}
+
+	private String hashForVerify(String payload, String secretKey)
+			throws NoSuchAlgorithmException, InvalidKeyException {
+		String hmac = new HmacUtils(encodingAlgorithm, secretKey).hmacHex(payload);
+		log.info("------HmacSHA256 encoded Message : {}", hmac);
+		return hmac;
+	}
+
+	/**
+	 * 
+	 * 
+	 * @param request
+	 * @param secretKey
+	 * @return
+	 * @throws Exception
+	 */
+	// @PostMapping("/api/sn_zoom_spoke/zoom_webhook_endpoint/webhook")
+	public ResponseEntity<?> eventWebhookListener(HttpServletRequest request, @RequestParam String secretKey)
+			throws Exception {
+		log.info("-----Webhook method to retrieve events. from the post with secretKey as : {}", secretKey);
+		String pushedJsonAsString = IOUtils.toString(request.getInputStream(), "utf-8");
+
+		log.info("------Event from webhook : {}", pushedJsonAsString);
+		JSONObject payload = (JSONObject) new JSONParser().parse(pushedJsonAsString);
+
+		String plainToken = (String) (((JSONObject) payload.get("payload")).get("plainToken"));
+
+		log.info("--------JsonObject : {}", payload);
+
 		Enumeration<String> headerNames = request.getHeaderNames();
 
 		if (headerNames != null) {
 			while (headerNames.hasMoreElements()) {
-				log.info("Header: {}", request.getHeader(headerNames.nextElement()));
+				log.debug("Header: {}", request.getHeader(headerNames.nextElement()));
 			}
 		}
 
@@ -53,34 +98,27 @@ public class ZoomWebhook {
 
 		String headerValue = request.getHeader("x-zm-request-timestamp");
 
-		log.info("-----Event : {} , payloadObject : {}, and eventTS : {}  and headerValue :{}", event, payloadObject,
+		log.debug("-----Event : {} , payloadObject : {}, and eventTS : {}  and headerValue :{}", event, payloadObject,
 				eventTS, headerValue);
+		String message = new StringBuilder().append("v0").append(":").append(headerValue).append(":").append(payload)
+				.toString();
 
-		String message = new StringBuilder().append("v0").append(":").append(headerValue).append(":")
-				.append(payloadObject).toString();
+		log.info("------Message : {}", message);
 
 		String hashForVerifyValue = hashForVerify(message, secretKey);
 		log.info("-----HashForVerify : {}", hashForVerifyValue);
 
 		String signature = new StringBuilder().append("v0").append("=").append(hashForVerifyValue).toString();
 		log.info("-----Signature : {}", signature);
+
+		log.info("----------request.getHeader(\"x-zm-signature\") :{}", request.getHeader("x-zm-signature"));
 		if (request.getHeader("x-zm-signature").equals(signature)) {
-			return ResponseEntity.status(HttpStatus.OK).body(new ModelMap().addAttribute("msg", "Validation Success."));
+			return ResponseEntity.status(HttpStatus.OK).body(new ModelMap().addAttribute("plainToken", plainToken)
+					.addAttribute("encryptedToken", hashForVerifyValue));
 		}
 
-		return ResponseEntity.status(HttpStatus.OK).body(
+		return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(
 				new ModelMap().addAttribute("msg", "Something went wrong. Try validating the webhook url again."));
 	}
 
-	private String hashForVerify(String payload, String secretKey)
-			throws NoSuchAlgorithmException, InvalidKeyException {
-		Mac sha256_HMAC = Mac.getInstance(encodingAlgorithm);
-		SecretKeySpec secretKeySpec = new SecretKeySpec(secretKey.getBytes(), encodingAlgorithm);
-		sha256_HMAC.init(secretKeySpec);
-
-		byte[] hash = sha256_HMAC.doFinal(payload.getBytes());
-		String message = Base64.getEncoder().encodeToString(hash);
-		log.info("------HmacSHA256 encoded Message : {}", message);
-		return message;
-	}
 }
